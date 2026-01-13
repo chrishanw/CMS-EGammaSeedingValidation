@@ -224,7 +224,7 @@ void egammaSeedingEfficiencyStudy::beginJob()
 	mctree_->Branch("mcEleEta", &mcEleEta_, "mcEleEta/D");
 	mctree_->Branch("mcEleE",   &mcEleE_, 	"mcEleE/D");
 	mctree_->Branch("nFound",   &nFound_, 	"nFound/s");
-	mctree_->Branch("isFound"   &isFound_, 	"isFound/O");
+	mctree_->Branch("isFound",  &isFound_, 	"isFound/O");
 
 	mctree_->Branch("minDR",    &minDR_,    "minDR/D");
 	mctree_->Branch("prElePt",  &prElePt_,  "prElePt/D");
