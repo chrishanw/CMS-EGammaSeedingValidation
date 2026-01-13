@@ -65,6 +65,7 @@
 #include "Geometry/TrackerGeometryBuilder/interface/StripGeomDetType.h"
 
 #include "SimTracker/TrackerHitAssociation/interface/ClusterTPAssociation.h"
+#include "TrackingTools/TrajectoryState/interface/TrajectoryStateTransform.h"
 
 class egammaSeedingEfficiencyStudy : public edm::one::EDAnalyzer<edm::one::SharedResources, edm::one::WatchRuns, edm::one::WatchLuminosityBlocks> {
   public:
@@ -90,8 +91,9 @@ class egammaSeedingEfficiencyStudy : public edm::one::EDAnalyzer<edm::one::Share
 		std::pair<reco::GenParticle*, int> match_to_genSN(double, double, reco::GenParticleCollection, double);
 		reco::GenParticle* matchGenSN(reco::Electron, const reco::GenParticleCollection&);
 
-		const edm::EDGetTokenT<reco::ElectronCollection>  electronToken;
+		const edm::EDGetTokenT<reco::ElectronCollection> electronToken;
 		const edm::EDGetTokenT<reco::GenParticleCollection> genParticlesToken;
+		const edm::EDGetTokenT<reco::ElectronSeedCollection> electronSeedToken;
 		// const edm::EDGetTokenT<std::vector<SimTrack>> simtracksToken;
 		// const edm::EDGetTokenT<TrackingParticleCollection> trackingParticlesToken;
 		// const edm::ESGetToken<TrackerTopology, TrackerTopologyRcd> topoToken_;
@@ -102,6 +104,7 @@ class egammaSeedingEfficiencyStudy : public edm::one::EDAnalyzer<edm::one::Share
 
 		TTree* mctree_;
 		TTree* prtree_;
+		TTree* prseedtree_;
 
 		double 	mcElePt_;
 		double 	mcElePhi_;
@@ -116,6 +119,11 @@ class egammaSeedingEfficiencyStudy : public edm::one::EDAnalyzer<edm::one::Share
 		double 	prEleE_;
 		ushort	nMatched_;
 		bool		isMatched_;
+		double 	prEleSeedPt_;
+		double 	prEleSeedPhi_;
+		double 	prEleSeedEta_;
+		double 	prEleSeedE_;
+		unsigned int prEleSeedUniqueID_;
 
 		double minDR_;
 
@@ -133,8 +141,9 @@ class egammaSeedingEfficiencyStudy : public edm::one::EDAnalyzer<edm::one::Share
 
 //Constructor
 egammaSeedingEfficiencyStudy::egammaSeedingEfficiencyStudy(const edm::ParameterSet& iConfig): 
-	electronToken  (consumes<reco::ElectronCollection>(iConfig.getParameter<edm::InputTag>("electron"))),
-	genParticlesToken  (consumes<reco::GenParticleCollection> (iConfig.getParameter<edm::InputTag>("genParticles"))),
+	electronToken     (consumes<reco::ElectronCollection>(iConfig.getParameter<edm::InputTag>("electron"))),
+	genParticlesToken (consumes<reco::GenParticleCollection>(iConfig.getParameter<edm::InputTag>("genParticles"))),
+	electronSeedToken (consumes<reco::ElectronSeedCollection>(iConfig.getParameter<edm::InputTag>("electronSeed"))),
 	// trackingParticlesToken (consumes<TrackingParticleCollection>(iConfig.getParameter<edm::InputTag>("trackingParticles"))),
 	// topoToken_(esConsumes()),
 	// geomToken_(esConsumes()),
@@ -168,26 +177,31 @@ void egammaSeedingEfficiencyStudy::beginRun(edm::Run const& iRun, edm::EventSetu
 
 void egammaSeedingEfficiencyStudy::initialize() {
 
-	mcElePt_ 		= 0.;
-	mcElePhi_ 	= 0.;
-	mcEleEta_ 	= 0.;
-	mcEleE_ 		= 0.;
-	nFound_ 		= 0;
-	isFound_ 		= false;
+	mcElePt_    = 0.;
+	mcElePhi_   = 0.;
+	mcEleEta_   = 0.;
+	mcEleE_     = 0.;
+	nFound_     = 0;
+	isFound_    = false;
 
-	prElePt_ 		= 0.;
-	prElePhi_ 	= 0.;
-	prEleEta_ 	= 0.;
-	prEleE_ 		= 0.;
-	nMatched_ 	= 0;
-	isMatched_ 	= false;
+	prElePt_    = 0.;
+	prElePhi_   = 0.;
+	prEleEta_   = 0.;
+	prEleE_     = 0.;
+	nMatched_   = 0;
+	isMatched_  = false;
+	prEleSeedPt_    = 0.;
+	prEleSeedPhi_   = 0.;
+	prEleSeedEta_   = 0.;
+	prEleSeedE_     = 0.;
+	prEleSeedUniqueID_ = 0;
 
 	minDR_ 			= std::numeric_limits<double>::max();
 
   // eventPassed_ = false;
-	run_ = 0;
-	lumi_= 0;
-	event_ = 0;
+	run_    = 0;
+	lumi_   = 0;
+	event_  = 0;
 }
 
 
@@ -200,44 +214,54 @@ void egammaSeedingEfficiencyStudy::beginJob()
 	// Create the TTree
 	mctree_ = fs->make<TTree>("mctree"  , "mctree");
 
-	mctree_->Branch("event",  &event_,  "event/I");
-	mctree_->Branch("lumi",   &lumi_,   "lumi/I");
-	mctree_->Branch("run",    &run_,    "run/I");
+	mctree_->Branch("event",    &event_,  "event/I");
+	mctree_->Branch("lumi",     &lumi_,   "lumi/I");
+	mctree_->Branch("run",      &run_,    "run/I");
 	// mctree_->Branch("passed",	&eventPassed_, 	"passed/O");
 
-	mctree_->Branch("mcElePt", 	&mcElePt_, 	"mcElePt/D");
-	mctree_->Branch("mcElePhi",	&mcElePhi_, "mcElePhi/D");
-	mctree_->Branch("mcEleEta",	&mcEleEta_, "mcEleEta/D");
-	mctree_->Branch("mcEleE",	  &mcEleE_, 	"mcEleE/D");
-	mctree_->Branch("nFound",		&nFound_, 	"nFound/s");
-	mctree_->Branch("isFound",	&isFound_, 	"isFound/O");
+	mctree_->Branch("mcElePt",  &mcElePt_, 	"mcElePt/D");
+	mctree_->Branch("mcElePhi", &mcElePhi_, "mcElePhi/D");
+	mctree_->Branch("mcEleEta", &mcEleEta_, "mcEleEta/D");
+	mctree_->Branch("mcEleE",   &mcEleE_, 	"mcEleE/D");
+	mctree_->Branch("nFound",   &nFound_, 	"nFound/s");
+	mctree_->Branch("isFound"   &isFound_, 	"isFound/O");
 
-	mctree_->Branch("minDR",		&minDR_, 		"minDR/D");
-	mctree_->Branch("prElePt", 	&prElePt_, 	"prElePt/D");
-	mctree_->Branch("prElePhi",	&prElePhi_, "prElePhi/D");
-	mctree_->Branch("prEleEta",	&prEleEta_, "prEleEta/D");
-	mctree_->Branch("prEleE",	  &prEleE_, 	"prEleE/D");
+	mctree_->Branch("minDR",    &minDR_,    "minDR/D");
+	mctree_->Branch("prElePt",  &prElePt_,  "prElePt/D");
+	mctree_->Branch("prElePhi", &prElePhi_, "prElePhi/D");
+	mctree_->Branch("prEleEta", &prEleEta_, "prEleEta/D");
+	mctree_->Branch("prEleE",   &prEleE_, 	"prEleE/D");
+	mctree_->Branch("prEleSeedPt", 	&prEleSeedPt_, 	"prEleSeedPt/D");
+	mctree_->Branch("prEleSeedPhi",	&prEleSeedPhi_, "prEleSeedPhi/D");
+	mctree_->Branch("prEleSeedEta",	&prEleSeedEta_, "prEleSeedEta/D");
+	mctree_->Branch("prEleSeedE",   &prEleSeedE_,   "prEleSeedE/D");
+	mctree_->Branch("prEleSeedUniqueID",  &prEleSeedUniqueID_,  "prEleSeedUniqueID/i");
 
 	// Create the TTree
 	prtree_ = fs->make<TTree>("prtree"  , "prtree");
 
-	prtree_->Branch("event",  &event_,  "event/I");
-	prtree_->Branch("lumi",   &lumi_,   "lumi/I");
-	prtree_->Branch("run",    &run_,    "run/I");
+	prtree_->Branch("event",    &event_,  "event/I");
+	prtree_->Branch("lumi",     &lumi_,   "lumi/I");
+	prtree_->Branch("run",      &run_,    "run/I");
 	// prtree_->Branch("passed",	&eventPassed_, 	"passed/O");
 
-	prtree_->Branch("mcElePt", 	&mcElePt_, 	"mcElePt/D");
-	prtree_->Branch("mcElePhi",	&mcElePhi_, "mcElePhi/D");
-	prtree_->Branch("mcEleEta",	&mcEleEta_, "mcEleEta/D");
-	prtree_->Branch("mcEleE",	  &mcEleE_, 	"mcEleE/D");
+	prtree_->Branch("mcElePt",  &mcElePt_, 	"mcElePt/D");
+	prtree_->Branch("mcElePhi", &mcElePhi_, "mcElePhi/D");
+	prtree_->Branch("mcEleEta", &mcEleEta_, "mcEleEta/D");
+	prtree_->Branch("mcEleE",   &mcEleE_, 	"mcEleE/D");
 
-	prtree_->Branch("minDR",		&minDR_, 		"minDR/D");
-	prtree_->Branch("prElePt", 	&prElePt_, 	"prElePt/D");
-	prtree_->Branch("prElePhi",	&prElePhi_, "prElePhi/D");
-	prtree_->Branch("prEleEta",	&prEleEta_, "prEleEta/D");
-	prtree_->Branch("prEleE",	  &prEleE_, 	"prEleE/D");
-	prtree_->Branch("nMatched",	&nMatched_,	"nMatched/s");
+	prtree_->Branch("minDR",    &minDR_,    "minDR/D");
+	prtree_->Branch("prElePt",  &prElePt_,  "prElePt/D");
+	prtree_->Branch("prElePhi", &prElePhi_, "prElePhi/D");
+	prtree_->Branch("prEleEta", &prEleEta_, "prEleEta/D");
+	prtree_->Branch("prEleE",   &prEleE_,   "prEleE/D");
+	prtree_->Branch("nMatched", &nMatched_, "nMatched/s");
 	prtree_->Branch("isMatched",&isMatched_,"isMatched/O");
+	prtree_->Branch("prEleSeedPt", 	&prEleSeedPt_, 	"prEleSeedPt/D");
+	prtree_->Branch("prEleSeedPhi",	&prEleSeedPhi_, "prEleSeedPhi/D");
+	prtree_->Branch("prEleSeedEta",	&prEleSeedEta_, "prEleSeedEta/D");
+	prtree_->Branch("prEleSeedE",   &prEleSeedE_,   "prEleSeedE/D");
+	prtree_->Branch("prEleSeedUniqueID",  &prEleSeedUniqueID_,  "prEleSeedUniqueID/i");
 }
 
 
@@ -261,6 +285,8 @@ void egammaSeedingEfficiencyStudy::analyze(const edm::Event& iEvent, const edm::
 	iEvent.getByToken(electronToken, electronH);
 	edm::Handle<reco::GenParticleCollection> genParticlesH;
 	iEvent.getByToken(genParticlesToken, genParticlesH);
+	edm::Handle<reco::ElectronSeedCollection> electronSeedH;
+	iEvent.getByToken(electronSeedToken, electronSeedH);
 
 	//-------------- Event Info -----------------------------------
 	run_    = iEvent.id().run();
@@ -328,8 +354,9 @@ void egammaSeedingEfficiencyStudy::analyze(const edm::Event& iEvent, const edm::
 				prElePt_  = -1.;
 				prEleEta_ = -9.;
 				prElePhi_ = -4.;
-				prEleE_ 	= -1.;
-				minDR_		= -1.;
+				prEleE_   = -1.;
+				prEleSeedUniqueID_  = -1;
+				minDR_    = -1.;
 				mctree_->Fill();
 				continue;
 			}
@@ -346,8 +373,10 @@ void egammaSeedingEfficiencyStudy::analyze(const edm::Event& iEvent, const edm::
 					prElePt_  = eleItr->pt();
 					prEleEta_ = eleItr->eta();
 					prElePhi_ = eleItr->phi();
-					prEleE_ 	= eleItr->energy();
-					minDR_ 		= deltaR;
+					prEleE_   = eleItr->energy();
+					const auto& seed = eleItr->gsfTrack()->seedRef();
+					prEleSeedUniqueID_  = seed->uniqueID();
+					minDR_    = deltaR;
 				}
 			}
 
@@ -364,8 +393,10 @@ void egammaSeedingEfficiencyStudy::analyze(const edm::Event& iEvent, const edm::
 						prElePt_  = eleItr->pt();
 						prEleEta_ = eleItr->eta();
 						prElePhi_ = eleItr->phi();
-						prEleE_ 	= eleItr->energy();
-						minDR_ 		= deltaR;
+						prEleE_   = eleItr->energy();
+						const auto& seed = eleItr->gsfTrack()->seedRef();
+						prEleSeedUniqueID_ = seed->uniqueID();
+						minDR_    = deltaR;
 					}
 				}
 			}
@@ -375,12 +406,14 @@ void egammaSeedingEfficiencyStudy::analyze(const edm::Event& iEvent, const edm::
 		// For each reco electron check whether it has an MC counterpart. If so, consider it matched.
 		// If no MC counterpart is found, the reco electron is considered a fake.
 		for (auto eleItr = electronH->begin(); eleItr != electronH->end(); ++eleItr) {
+			const auto& seed = eleItr->gsfTrack()->seedRef();
 
-			prElePt_  	= eleItr->pt();
-			prEleEta_ 	= eleItr->eta();
-			prElePhi_ 	= eleItr->phi();
-			prEleE_ 		= eleItr->energy();
-			nMatched_		= 0;
+			prElePt_    = eleItr->pt();
+			prEleEta_   = eleItr->eta();
+			prElePhi_   = eleItr->phi();
+			prEleE_     = eleItr->energy();
+			prEleSeedUniqueID_ = seed->uniqueID();
+			nMatched_   = 0;
 			isMatched_  = false;
 
 			minDR_ = std::numeric_limits<double>::max();
@@ -389,8 +422,8 @@ void egammaSeedingEfficiencyStudy::analyze(const edm::Event& iEvent, const edm::
 				mcElePt_  = -1.;
 				mcEleEta_ = -9.;
 				mcElePhi_ = -4.;
-				mcEleE_ 	= -1.;
-				minDR_		= -1.;
+				mcEleE_   = -1.;
+				minDR_    = -1.;
 				prtree_->Fill();
 				continue;
 			}
