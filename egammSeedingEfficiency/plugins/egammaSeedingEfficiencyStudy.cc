@@ -67,6 +67,33 @@
 #include "SimTracker/TrackerHitAssociation/interface/ClusterTPAssociation.h"
 #include "TrackingTools/TrajectoryState/interface/TrajectoryStateTransform.h"
 
+
+template<>
+struct std::hash<GlobalPoint>
+{
+  std::size_t operator()(const GlobalPoint& p) const noexcept {
+    unsigned long long k;
+    memcpy(&k, &p, sizeof(k));
+    auto h = std::hash<unsigned long long>{}(k);
+    return h;
+  }
+};
+
+template<>
+struct std::hash<TrajectorySeed::RecHitRange>
+{
+  std::size_t operator()(const TrajectorySeed::RecHitRange& recHits) const noexcept
+  {
+    size_t h = std::numeric_limits<size_t>::max() / 13;
+    for (const auto& recHit : recHits) {
+      const auto& pos = recHit.globalPosition();
+      auto h2 = std::hash<GlobalPoint>{}(pos);
+      h = h ^ (h2 << 1);
+    }
+    return h;
+  }
+};
+
 class egammaSeedingEfficiencyStudy : public edm::one::EDAnalyzer<edm::one::SharedResources, edm::one::WatchRuns, edm::one::WatchLuminosityBlocks> {
   public:
     explicit egammaSeedingEfficiencyStudy(const edm::ParameterSet&);
@@ -94,6 +121,7 @@ class egammaSeedingEfficiencyStudy : public edm::one::EDAnalyzer<edm::one::Share
     const edm::EDGetTokenT<reco::ElectronCollection> electronToken;
     const edm::EDGetTokenT<reco::GenParticleCollection> genParticlesToken;
     const edm::EDGetTokenT<reco::ElectronSeedCollection> electronSeedToken;
+    
     // const edm::EDGetTokenT<std::vector<SimTrack>> simtracksToken;
     // const edm::EDGetTokenT<TrackingParticleCollection> trackingParticlesToken;
     // const edm::ESGetToken<TrackerTopology, TrackerTopologyRcd> topoToken_;
@@ -104,7 +132,7 @@ class egammaSeedingEfficiencyStudy : public edm::one::EDAnalyzer<edm::one::Share
 
     TTree* mctree_;
     TTree* prtree_;
-    TTree* prseedtree_;
+    // TTree* prseedtree_;
 
     double  mcElePt_;
     double  mcElePhi_;
@@ -123,7 +151,8 @@ class egammaSeedingEfficiencyStudy : public edm::one::EDAnalyzer<edm::one::Share
     double  prEleSeedPhi_;
     double  prEleSeedEta_;
     double  prEleSeedE_;
-    int  prEleSeedUniqueID_;
+    int     prEleSeedUniqueID_;
+    size_t  prEleSeedUniqueHash_;
 
     double minDR_;
 
@@ -136,6 +165,7 @@ class egammaSeedingEfficiencyStudy : public edm::one::EDAnalyzer<edm::one::Share
     // Define either Zee or ttbar for the process
     bool isZee_ = true;
     bool isttbar_ = false;
+    bool isMC_ = true;
     uint8_t eMotherPDG_;
 };
 
@@ -153,7 +183,8 @@ egammaSeedingEfficiencyStudy::egammaSeedingEfficiencyStudy(const edm::ParameterS
   verbose_(iConfig.getParameter<bool>("verbose")),
   DeltaR_(iConfig.getParameter<double>("deltaR")),
   isZee_(iConfig.getParameter<bool>("isZee")),
-  isttbar_(iConfig.getParameter<bool>("isttbar"))
+  isttbar_(iConfig.getParameter<bool>("isttbar")),
+  isMC_(iConfig.getParameter<bool>("isMC"))
 {
   initialize();
   usesResource("TFileService");
@@ -194,8 +225,9 @@ void egammaSeedingEfficiencyStudy::initialize() {
   prEleSeedEta_ = 0.;
   prEleSeedE_   = 0.;
   prEleSeedUniqueID_ = -1;
+  prEleSeedUniqueHash_ = 0;
 
-  minDR_       = std::numeric_limits<double>::max();
+  minDR_        = std::numeric_limits<double>::max();
 
   // eventPassed_ = false;
   run_    = 0;
@@ -235,6 +267,7 @@ void egammaSeedingEfficiencyStudy::beginJob()
   mctree_->Branch("prEleSeedEta", &prEleSeedEta_, "prEleSeedEta/D");
   mctree_->Branch("prEleSeedE",   &prEleSeedE_,   "prEleSeedE/D");
   mctree_->Branch("prEleSeedUniqueID",  &prEleSeedUniqueID_,  "prEleSeedUniqueID/I");
+  mctree_->Branch("prEleSeedUniqueHash",  &prEleSeedUniqueHash_,  "prEleSeedUniqueHash/l");
 
   // Create the TTree
   prtree_ = fs->make<TTree>("prtree"  , "prtree");
@@ -261,6 +294,7 @@ void egammaSeedingEfficiencyStudy::beginJob()
   prtree_->Branch("prEleSeedEta", &prEleSeedEta_, "prEleSeedEta/D");
   prtree_->Branch("prEleSeedE",   &prEleSeedE_,   "prEleSeedE/D");
   prtree_->Branch("prEleSeedUniqueID",  &prEleSeedUniqueID_,  "prEleSeedUniqueID/I");
+  prtree_->Branch("prEleSeedUniqueHash",  &prEleSeedUniqueHash_,  "prEleSeedUniqueHash/l");
 }
 
 
@@ -297,30 +331,32 @@ void egammaSeedingEfficiencyStudy::analyze(const edm::Event& iEvent, const edm::
 
   std::vector<reco::GenParticle> genElectrons;
 
-  for (auto genItr = genParticlesH->begin(); genItr != genParticlesH->end(); ++genItr) {
-    const auto& genPart = *genItr;
-    if (abs(genItr->pdgId())==11) {
-      if (std::abs(genPart.mother()->pdgId()) == eMotherPDG_ && genPart.isPromptFinalState()) {
-        if (genPart.status()==1)
-          genElectrons.push_back(genPart);
-        else if (genPart.status()==2)
-          genElectrons.push_back(get_lastcopy_prefsrSN(genPart));
-        else if (genPart.status()==3)
-          genElectrons.push_back(get_lastcopySN(genPart));
-      }
-      else {
-        if (genPart.numberOfMothers() == 0)
-          genElectrons.push_back(genPart);
+  if (isMC_) {
+    for (auto genItr = genParticlesH->begin(); genItr != genParticlesH->end(); ++genItr) {
+      const auto& genPart = *genItr;
+      if (abs(genItr->pdgId())==11) {
+        if (std::abs(genPart.mother()->pdgId()) == eMotherPDG_ && genPart.isPromptFinalState()) {
+          if (genPart.status()==1)
+            genElectrons.push_back(genPart);
+          else if (genPart.status()==2)
+            genElectrons.push_back(get_lastcopy_prefsrSN(genPart));
+          else if (genPart.status()==3)
+            genElectrons.push_back(get_lastcopySN(genPart));
+        }
+        else {
+          if (genPart.numberOfMothers() == 0)
+            genElectrons.push_back(genPart);
+        }
       }
     }
-  }
 
-  if (verbose_) {
-    std::cout<<" --- Collecion of gen electrons ---- "<<std::endl;
-    for(size_t i = 0; i != genElectrons.size(); ++i) {
-      std::cout<<" Gen electron "<< i <<" 4-momentum :("<< genElectrons.at(i).pt() <<","<<genElectrons.at(i).eta()<<","<<genElectrons.at(i).phi() <<","<< genElectrons.at(i).energy()<<")"<<std::endl;
+    if (verbose_) {
+      std::cout<<" --- Collecion of gen electrons ---- "<<std::endl;
+      for(size_t i = 0; i != genElectrons.size(); ++i) {
+        std::cout<<" Gen electron "<< i <<" 4-momentum :("<< genElectrons.at(i).pt() <<","<<genElectrons.at(i).eta()<<","<<genElectrons.at(i).phi() <<","<< genElectrons.at(i).energy()<<")"<<std::endl;
+      }
+      std::cout<<" ------------------------------------"<<std::endl;
     }
-    std::cout<<" ------------------------------------"<<std::endl;
   }
 
   // edm::Handle<TrackingParticleCollection> TrackingParticleH;
@@ -336,88 +372,128 @@ void egammaSeedingEfficiencyStudy::analyze(const edm::Event& iEvent, const edm::
 
   if (electronH.isValid()) {
 
-    // For each MC electron check whether it has a reco counterpart. If so, consider it found.
-    // If no reco counterpart is found, the electron is considered missing
-    for (const auto& genEle : genElectrons) {
+    if (isMC_) {
+      // For each MC electron check whether it has a reco counterpart. If so, consider it found.
+      // If no reco counterpart is found, the electron is considered missing
+      for (const auto& genEle : genElectrons) {
 
-      mcElePt_  = genEle.pt();
-      mcEleEta_ = genEle.eta();
-      mcElePhi_ = genEle.phi();
-      mcEleE_   = genEle.energy();
-      nFound_   = 0;
-      isFound_  = false;
-
-      minDR_ = std::numeric_limits<double>::max();
-
-      if (electronH->size() == 0) {
-        prElePt_  = -1.;
-        prEleEta_ = -9.;
-        prElePhi_ = -4.;
-        prEleE_   = -1.;
-        prEleSeedUniqueID_  = -1;
-        minDR_    = -1.;
-        mctree_->Fill();
-        continue;
-      }
-
-      for (auto eleItr = electronH->begin(); eleItr != electronH->end(); ++eleItr) {
-
-        const float deltaR = dr(genEle.eta(), eleItr->eta(), genEle.phi(), eleItr->phi());
-
-        isFound_ |= deltaR < DeltaR_;
-        // There can be multiple reco electrons close to the MC electron. Only store the information of
-        // the closest reco electrons, but count the reco electrons that would be considered found.
-        if (deltaR < DeltaR_ and deltaR < minDR_) {
-          nFound_++;
-          prElePt_  = eleItr->pt();
-          prEleEta_ = eleItr->eta();
-          prElePhi_ = eleItr->phi();
-          prEleE_   = eleItr->energy();
-          const auto& seed    = eleItr->gsfTrack()->seedRef();
-          prEleSeedUniqueID_  = seed->uniqueID();
-          minDR_    = deltaR;
-        }
-      }
-
-      // No matching reco electron found, find the closest PR electron anyway
-      if (not isFound_) {
+        mcElePt_  = genEle.pt();
+        mcEleEta_ = genEle.eta();
+        mcElePhi_ = genEle.phi();
+        mcEleE_   = genEle.energy();
+        nFound_   = 0;
+        isFound_  = false;
 
         minDR_ = std::numeric_limits<double>::max();
+
+        if (electronH->size() == 0) {
+          prElePt_  = -1.;
+          prEleEta_ = -9.;
+          prElePhi_ = -4.;
+          prEleE_   = -1.;
+          prEleSeedUniqueID_  = -1;
+          minDR_    = -1.;
+          mctree_->Fill();
+          continue;
+        }
 
         for (auto eleItr = electronH->begin(); eleItr != electronH->end(); ++eleItr) {
 
           const float deltaR = dr(genEle.eta(), eleItr->eta(), genEle.phi(), eleItr->phi());
 
-          if (deltaR < minDR_) {
+          isFound_ |= deltaR < DeltaR_;
+          // There can be multiple reco electrons close to the MC electron. Only store the information of
+          // the closest reco electrons, but count the reco electrons that would be considered found.
+          if (deltaR < DeltaR_ and deltaR < minDR_) {
+            nFound_++;
             prElePt_  = eleItr->pt();
             prEleEta_ = eleItr->eta();
             prElePhi_ = eleItr->phi();
             prEleE_   = eleItr->energy();
-            const auto& seed    = eleItr->gsfTrack()->seedRef();
-            prEleSeedUniqueID_  = seed->uniqueID();
+            const auto& seed      = eleItr->gsfTrack()->seedRef();
+            // const auto& EleSeed   = static_cast<reco::ElectronSeed>(*seed);
+            // prEleSeedUniqueID_    = EleSeed.uniqueID();
+            prEleSeedUniqueHash_  = std::hash<TrajectorySeed::RecHitRange>{}(seed->recHits());
+            // std::cout << "deltaR < DeltaR_ and deltaR < minDR_: " << prEleSeedUniqueID_ << std::endl;
             minDR_    = deltaR;
           }
         }
+
+        // No matching reco electron found, find the closest PR electron anyway
+        if (not isFound_) {
+
+          minDR_ = std::numeric_limits<double>::max();
+
+          for (auto eleItr = electronH->begin(); eleItr != electronH->end(); ++eleItr) {
+
+            const float deltaR = dr(genEle.eta(), eleItr->eta(), genEle.phi(), eleItr->phi());
+
+            if (deltaR < minDR_) {
+              prElePt_  = eleItr->pt();
+              prEleEta_ = eleItr->eta();
+              prElePhi_ = eleItr->phi();
+              prEleE_   = eleItr->energy();
+              const auto& seed      = eleItr->gsfTrack()->seedRef();
+              // const auto& EleSeed   = static_cast<reco::ElectronSeed>(*seed);
+              // prEleSeedUniqueID_    = EleSeed.uniqueID();
+              const auto& EleSeed   = dynamic_cast<const reco::ElectronSeed*>(&(*seed)); // works
+              prEleSeedUniqueID_    = EleSeed->uniqueID();
+              prEleSeedUniqueHash_  = std::hash<TrajectorySeed::RecHitRange>{}(seed->recHits());
+              // std::cout << "not isFound_: " << prEleSeedUniqueID_ << std::endl;
+              minDR_    = deltaR;
+            }
+          }
+        }
+        mctree_->Fill();
       }
-      mctree_->Fill();
     }
+
+    // std::cout << "electronSeedH->size(): " << electronSeedH->size() << std::endl;
+    // for (auto seedEleItr = electronSeedH->begin(); seedEleItr != electronSeedH->end(); ++seedEleItr) {
+    //   // std::cout << "ElectronSeed &seedEleItr: " << &(*seedEleItr) << std::endl;
+    //   // std::cout << "some data: seedEleItr->dPhiNeg(0): " << seedEleItr->dPhiNeg(0) << ", seedEleItr->dPhiPos(0): " << seedEleItr->dPhiPos(0) << std::endl;
+    //   // std::cout << "some data: seedEleItr->dPhiNeg(1): " << seedEleItr->dPhiNeg(1) << ", seedEleItr->dPhiPos(1): " << seedEleItr->dPhiPos(1) << std::endl;
+
+    //   const auto& recHits = seedEleItr->recHits();
+    //   for (const auto& recHit : recHits) {
+    //     const auto& pos = recHit.globalPosition();
+    //     std::cout << "ElectronSeed RecHits: (x, y, z): (" << pos.x() << ", " << pos.y() << ", " << pos.z() << ")" << std::endl;
+    //   }
+    //   const auto& theHash = std::hash<TrajectorySeed::RecHitRange>{}(recHits);
+    //   std::cout << "ElectronSeed theHash: " << theHash << std::endl;
+    // }
+
 
     // For each reco electron check whether it has an MC counterpart. If so, consider it matched.
     // If no MC counterpart is found, the reco electron is considered a fake.
+
+    // std::cout << "electronH->size(): " << electronH->size() << std::endl;
     for (auto eleItr = electronH->begin(); eleItr != electronH->end(); ++eleItr) {
       const auto& seed = eleItr->gsfTrack()->seedRef();
+      // const auto& EleSeed   = static_cast<reco::ElectronSeed>(*seed); // works, or rather compiles, but does not yield an EleSeed from which I get a valid uniqueID
+      const auto& EleSeed   = dynamic_cast<const reco::ElectronSeed*>(&(*seed)); // works
+      // const auto& EleSeed = const_cast<const reco::ElectronSeed*>(&(*seed)); // does not work
+      // // std::cout << "Electron &seed: " << &seed << std::endl;
+      // const auto& recHits = seed->recHits();
+      // for (const auto& recHit : recHits) {
+      //   const auto& pos = recHit.globalPosition();
+      //   std::cout << "Electron RecHits: (x, y, z): (" << pos.x() << ", " << pos.y() << ", " << pos.z() << ")" << std::endl;
+      // }
+      // const auto& theHash = std::hash<TrajectorySeed::RecHitRange>{}(recHits);
+      // std::cout << "Electron theHash: " << theHash << std::endl;
 
       prElePt_    = eleItr->pt();
       prEleEta_   = eleItr->eta();
       prElePhi_   = eleItr->phi();
       prEleE_     = eleItr->energy();
-      prEleSeedUniqueID_ = seed->uniqueID();
+      prEleSeedUniqueID_    = EleSeed->uniqueID();
+      prEleSeedUniqueHash_  = std::hash<TrajectorySeed::RecHitRange>{}(seed->recHits());
+      // std::cout << "Run, Lumi, Event: " << run_ << ", " << lumi_ << ", " << event_ << " : Electron loop: " << prEleSeedUniqueID_ << std::endl;
       nMatched_   = 0;
       isMatched_  = false;
 
-      minDR_ = std::numeric_limits<double>::max();
 
-      if (genElectrons.size() == 0) {
+      if (not isMC_ or genElectrons.size() == 0) {
         mcElePt_  = -1.;
         mcEleEta_ = -9.;
         mcElePhi_ = -4.;
@@ -427,38 +503,42 @@ void egammaSeedingEfficiencyStudy::analyze(const edm::Event& iEvent, const edm::
         continue;
       }
 
-      for(const auto& genEle : genElectrons) {
-
-        const float deltaR = dr(genEle.eta(), eleItr->eta(), genEle.phi(), eleItr->phi());
-
-        isMatched_ |= deltaR < DeltaR_;
-        // There can be multiple MC electrons close to the reco electron. Only store the information of
-        // the closest MC electrons, but count the MC electrons that would be considered matched.
-        if (deltaR < DeltaR_ and deltaR < minDR_) {
-          nMatched_++;
-          mcElePt_  = genEle.pt();
-          mcEleEta_ = genEle.eta();
-          mcElePhi_ = genEle.phi();
-          mcEleE_   = genEle.energy();
-          minDR_    = deltaR;
-        }
-      }
-
-      // No matching MC electron found, find the closest MC electron anyway
-      if (not isMatched_) {
-
+      if (isMC_) {
         minDR_ = std::numeric_limits<double>::max();
 
         for(const auto& genEle : genElectrons) {
 
           const float deltaR = dr(genEle.eta(), eleItr->eta(), genEle.phi(), eleItr->phi());
 
+          isMatched_ |= deltaR < DeltaR_;
+          // There can be multiple MC electrons close to the reco electron. Only store the information of
+          // the closest MC electrons, but count the MC electrons that would be considered matched.
           if (deltaR < DeltaR_ and deltaR < minDR_) {
+            nMatched_++;
             mcElePt_  = genEle.pt();
             mcEleEta_ = genEle.eta();
             mcElePhi_ = genEle.phi();
             mcEleE_   = genEle.energy();
             minDR_    = deltaR;
+          }
+        }
+
+        // No matching MC electron found, find the closest MC electron anyway
+        if (not isMatched_) {
+
+          minDR_ = std::numeric_limits<double>::max();
+
+          for(const auto& genEle : genElectrons) {
+
+            const float deltaR = dr(genEle.eta(), eleItr->eta(), genEle.phi(), eleItr->phi());
+
+            if (deltaR < DeltaR_ and deltaR < minDR_) {
+              mcElePt_  = genEle.pt();
+              mcEleEta_ = genEle.eta();
+              mcElePhi_ = genEle.phi();
+              mcEleE_   = genEle.energy();
+              minDR_    = deltaR;
+            }
           }
         }
       }
