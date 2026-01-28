@@ -413,6 +413,8 @@ void egammaSeedingEfficiencyStudy::analyze(const edm::Event& iEvent, const edm::
             const auto& seed      = eleItr->gsfTrack()->seedRef();
             // const auto& EleSeed   = static_cast<reco::ElectronSeed>(*seed);
             // prEleSeedUniqueID_    = EleSeed.uniqueID();
+            const auto& EleSeed   = dynamic_cast<const reco::ElectronSeed*>(&(*seed)); // works
+            prEleSeedUniqueID_    = EleSeed->uniqueID();
             prEleSeedUniqueHash_  = std::hash<TrajectorySeed::RecHitRange>{}(seed->recHits());
             // std::cout << "deltaR < DeltaR_ and deltaR < minDR_: " << prEleSeedUniqueID_ << std::endl;
             minDR_    = deltaR;
